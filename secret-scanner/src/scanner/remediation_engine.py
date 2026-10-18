@@ -1,39 +1,44 @@
 import os
 import json
-import asyncio
 from typing import Dict, Any
 
-# Safely import google.generativeai without crashing backend if missing
+# Safely import groq without crashing backend if missing
 try:
-    import google.generativeai as genai
-    GENAI_AVAILABLE = True
+    from groq import AsyncGroq
+    GROQ_AVAILABLE = True
 except ImportError:
-    GENAI_AVAILABLE = False
+    GROQ_AVAILABLE = False
 
 
 class AIRemediationEngine:
     """Generates context-aware remediation instructions for detected secrets and security risks."""
 
+    DEFAULT_MODELS = [
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "gemma2-9b-it",
+    ]
+
     @staticmethod
     async def generate_remediation(
         issue_type: str, file_path: str, line_number: int, validation_status: str
     ) -> Dict[str, Any]:
-        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        groq_key = os.getenv("GROQ_API_KEY")
 
-        # 1. Attempt LLM Generation if library is available & API key exists
-        if GENAI_AVAILABLE and gemini_key:
+        # 1. Attempt LLM generation if library is available & API key exists
+        if GROQ_AVAILABLE and groq_key:
             try:
-                print(f"[AIRemediationEngine] Requesting AI remediation for: '{issue_type}'")
-                return await AIRemediationEngine._generate_gemini_remediation(
-                    issue_type, file_path, line_number, validation_status, gemini_key
+                print(f"[AIRemediationEngine] Requesting Groq remediation for: '{issue_type}'")
+                return await AIRemediationEngine._generate_groq_remediation(
+                    issue_type, file_path, line_number, validation_status, groq_key
                 )
             except Exception as e:
-                print(f"[AIRemediationEngine] Gemini API call failed: {e}. Falling back to static template.")
+                print(f"[AIRemediationEngine] Groq API call failed: {e}. Falling back to static template.")
         else:
-            if not GENAI_AVAILABLE:
-                print("[AIRemediationEngine] WARNING: 'google-generativeai' package is not installed.")
-            if not gemini_key:
-                print("[AIRemediationEngine] WARNING: Neither GEMINI_API_KEY nor GOOGLE_API_KEY is set.")
+            if not GROQ_AVAILABLE:
+                print("[AIRemediationEngine] WARNING: 'groq' package is not installed.")
+            if not groq_key:
+                print("[AIRemediationEngine] WARNING: GROQ_API_KEY is not set.")
 
         # 2. Fallback to static template engine
         return AIRemediationEngine._get_template_remediation(
@@ -41,38 +46,21 @@ class AIRemediationEngine:
         )
 
     @staticmethod
-    async def _generate_gemini_remediation(
+    async def _generate_groq_remediation(
         issue_type: str, file_path: str, line_number: int, validation_status: str, api_key: str
     ) -> Dict[str, Any]:
-        genai.configure(api_key=api_key)
+        client = AsyncGroq(api_key=api_key)
 
-        # Offload sync I/O operation (list_models) to thread worker to prevent event loop blocking
-        def get_active_models():
-            discovered = []
-            try:
-                for m in genai.list_models():
-                    if "generateContent" in m.supported_generation_methods:
-                        # Clean model name string (strip 'models/' prefix if present)
-                        clean_name = m.name.replace("models/", "")
-                        discovered.append(clean_name)
-                # Prioritize flash models
-                discovered.sort(key=lambda name: 0 if "flash" in name.lower() else 1)
-            except Exception as e:
-                print(f"[AIRemediationEngine] Failed to list models: {e}")
-            return discovered
+        env_model = os.getenv("GROQ_MODEL")
+        candidate_models = [env_model] if env_model else AIRemediationEngine.DEFAULT_MODELS
 
-        candidate_models = await asyncio.to_thread(get_active_models)
+        system_prompt = (
+            "You are an Application Security Engineer. A security scanner detected an issue "
+            "in a codebase. Generate clear, step-by-step remediation instructions. "
+            "Respond ONLY with a valid JSON object."
+        )
 
-        # Static fallback list if dynamic discovery returns empty
-        if not candidate_models:
-            candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
-
-        print(f"[AIRemediationEngine] Discovered candidate models: {candidate_models}")
-
-        prompt = f"""
-        You are an Application Security Engineer. A security scanner detected an issue in a codebase.
-        Generate clear, step-by-step remediation instructions.
-
+        user_prompt = f"""
         Context:
         - Issue Type: {issue_type}
         - File Path: {file_path}
@@ -95,15 +83,27 @@ class AIRemediationEngine:
         last_error = None
         for model_name in candidate_models:
             try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config={"response_mime_type": "application/json"}
+                response = await client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                    max_tokens=1024,
                 )
-                response = await model.generate_content_async(prompt)
-                return json.loads(response.text)
+                result = json.loads(response.choices[0].message.content)
+
+                # Basic schema validation so bad output falls through to the next model/template
+                required = {"title", "urgency", "summary", "steps", "code_example"}
+                if not required.issubset(result.keys()):
+                    raise ValueError(f"Missing keys in response: {required - result.keys()}")
+
+                return result
             except Exception as e:
                 last_error = e
-                print(f"[AIRemediationEngine] Model '{model_name}' execution failed: {e}. Trying next model...")
+                print(f"[AIRemediationEngine] Model '{model_name}' failed: {e}. Trying next model...")
 
         raise last_error
 

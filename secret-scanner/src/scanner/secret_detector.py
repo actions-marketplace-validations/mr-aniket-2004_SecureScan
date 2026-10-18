@@ -18,13 +18,13 @@ SECRET_PATTERNS = {
 # Directories to ignore during scan
 IGNORED_DIRS = {
     ".git", "node_modules", "venv", ".venv", "__pycache__", 
-    "build", "dist", "bin", "obj", ".idea", ".vscode"
+    "build", "dist", "bin", "obj", ".idea", ".vscode","Readme.md", "LICENSE", "docs", "tests", "test"
 }
 
 # Binary and non-text file extensions to skip automatically
 IGNORED_EXTENSIONS = {
     ".exe", ".dll", ".so", ".dylib", ".pyc", ".toc", 
-    ".pkg", ".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg", ".pdf"
+    ".pkg", ".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg"
 }
 
 class SecretDetector:
